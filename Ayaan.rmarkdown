@@ -1,0 +1,229 @@
+---
+title: "Case 2 Report"
+subtitle: "Your Names Here"
+format: html
+editor: visual
+---
+
+```{r packages}
+#| label: load-packages
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(ape)
+library(e1071)
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(kmer)
+library(ape)
+library(doParallel)
+library(kableExtra)
+library(MASS)
+library(pROC)
+```
+
+```{r}
+
+vignette("kmer-vignette")
+```
+
+```{r load data}
+#l label: load-data
+lep<- read.csv("lepidoptera_data/Lepidoptera_library.csv")
+test_seq <- read.csv("lepidoptera_data/test_sequences.csv")
+
+lep
+test_seq
+
+```
+
+papers to reference:
+https://www.biotaxa.org/Zootaxa/article/view/zootaxa.3148.1.41/41699
+https://www.sciencedirect.com/science/article/pii/S0378111916305364
+
+
+```{r test}
+lep_matrix <- str_split(lep$DNA, pattern="", simplify =T)
+test_seq_matrix <- str_split(test_seq$DNA, pattern="", simplify = T)
+
+lep_matrix[!(lep_matrix %in% c("G","T","A","C","-"))] <- "-"
+
+test_seq_matrix[!(test_seq_matrix %in% c("G","T","A","C","-"))] <- "-"
+
+lep_matrix
+```
+
+```{r}
+# Split data into training (70%) and testing (30%) sets
+set.seed(12345)
+
+data_sample <- sample(c(TRUE, FALSE), dim(lep_matrix)[1], replace = TRUE, prob = c(0.7, 0.3))
+x_training <- lep_matrix[data_sample, ]
+x_testing <- lep_matrix[!data_sample, ]
+family_training <- lep$Family[data_sample]
+genus_training <- lep$Genus[data_sample]
+family_testing <- lep$Family[!data_sample]
+genus_testing <- lep$Genus[!data_sample]
+
+
+```
+
+```{r LDA QDA}
+
+linear <- MASS::lda(Family ~., data = genus_training)
+quadratic <- MASS::qda(Species~., data = family_training)
+```
+
+```{r kmer}
+kmer3_x_training <- kcount(x_training, k = 3)
+kmer3_x_testing <- kcount(x_testing, k = 3)
+
+kmer4_x_training <- kcount(x_training, k = 4)
+kmer4_x_testing <- kcount(x_testing, k = 4)
+```
+
+```{r}
+kmer5_x_training <- kcount(x_training, k = 5)
+kmer5_x_testing <- kcount(x_testing, k = 5)
+```
+
+```{r fit model for training}
+registerDoParallel(detectCores() / 2)
+
+kmer3model <- cv.glmnet(kmer3_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+kmer3accuracy <- mean(predict(kmer3model, kmer3_x_testing, type = "class") == family_testing)
+
+kmer4model <- cv.glmnet(kmer4_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+kmer4accuracy <- mean(predict(kmer4model, kmer4_x_testing, type = "class") == family_testing)
+```
+
+```{r}
+kmer5model <- cv.glmnet(kmer5_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+print(kmer5model)
+
+```
+
+```{r}
+
+
+kmer5accuracy <- mean(predict(kmer5model, kmer5_x_testing, type = "class") == family_testing)
+
+print(kmer5accuracy)
+```
+
+```{r}
+kmer5model$lambda.min
+coef(kmer5model, s = "lambda.min")
+
+```
+
+```{r}
+kmer5modelfit <- glmnet(kmer5_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+```
+
+```{r}
+plot(kmer5modelfit, xvar = "lambda", label = TRUE, type.coef = "2norm")
+```
+
+```{r eval = FALSE}
+save(kmer3model, file = "kmer3model.rda")
+save(kmer4model, file = "kmer4model.rda")
+save(kmer5model, file = "kmer5model.rda")
+```
+
+```{r loading data}
+load(file = "kmer5model.rda")
+load(file = "kmer4model.rda")
+load(file = "kmer3model.rda")
+```
+
+```{r model}
+predictions <- predict(kmer5model, kmer5_x_testing, type = "class")
+
+predict_truth <- tibble(predict = predictions[,1],
+       truth = family_testing,
+       genus = genus_testing) %>%
+  mutate(correct = predict == truth)
+
+x <- confusionMatrix(table(predictions, family_testing))
+names <- sort(unique(lep$Family))
+modelOutput <- as_tibble(x$byClass) %>% 
+  mutate(Class = names) %>% 
+  select(Class, everything())
+
+modelOutput %>% 
+  kable(digits = 3)
+
+```
+
+```{r ROC2}
+predictions5 <- predict(kmer5model, kmer5_x_testing, type = "class")
+
+predictions4 <- predict(kmer4model, kmer4_x_testing, type = "class")
+
+predictions3 <- predict(kmer3model, kmer3_x_testing, type = "class")
+
+roc5 = roc(response = family_testing, predictor = factor(predictions5, ordered = TRUE))
+
+plot(roc5, main = "Family KMER 5 ROC curve")
+
+
+roc4 = roc(response = family_testing, predictor = factor(predictions4, ordered = TRUE))
+
+plot(roc4, main = "Family KMER 4 ROC curve")
+
+roc3 = roc(response = family_testing, predictor = factor(predictions3, ordered = TRUE))
+
+plot(roc3, main = "Family KMER 3 ROC curve")
+```
+
+```{r}
+plot(kmer5model)
+plot(kmer4model)
+plot(kmer3model)
+```
+
+```{r understanding output}
+probabilities <- as.tibble(
+  predict(kmer5model, kmer5_x_testing, type = "response")
+)
+
+```
+
+```{r genus model}
+tibble(genus_training) %>% 
+  count(genus_training) %>% 
+  arrange(n)
+factor_train <- as.factor(family_training) 
+factor_test <- as.factor(family_testing)
+
+numeric_labels_train <- as.numeric(factor_train)
+numeric_labels_test<- as.numeric(factor_test)
+kmer3_x_training_wfam <- cbind(kmer3_x_training, numeric_labels_train)
+kmer4_x_training_wfam <- cbind(kmer4_x_training, numeric_labels_train)
+kmer5_x_training_wfam <- cbind(kmer5_x_training, numeric_labels_train)
+```
+
+```{r genus model2}
+registerDoParallel(detectCores() / 2)
+
+kmer3model_gen <- cv.glmnet(kmer3_x_training_wfam, genus_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+kmer3accuracy_gen <- mean(predict(kmer3model, kmer3_x_testing, type = "class") == family_testing)
+
+kmer4model_gen <- cv.glmnet(kmer4_x_training_wfam, genus_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+kmer4accuracy_gen <- mean(predict(kmer4model, kmer4_x_testing, type = "class") == family_testing)
+
+kmer5model_gen <- cv.glmnet(kmer5_x_training_wfam, genus_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+kmer5accuracy_gen <- mean(predict(kmer5model, kmer5_x_testing, type = "class") == family_testing)
+```
+

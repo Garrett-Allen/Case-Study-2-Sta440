@@ -1,0 +1,328 @@
+---
+title: "Case 2 Report"
+subtitle: "Your Names Here"
+format: html
+editor: visual
+---
+
+```{r packages}
+#| label: load-packages
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(ape)
+library(e1071)
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(kmer)
+library(ape)
+library(doParallel)
+library(kableExtra)
+library(MASS)
+library(pROC)
+```
+
+```{r}
+
+vignette("kmer-vignette")
+```
+
+```{r load data}
+#l label: load-data
+lep<- read.csv("lepidoptera_data/Lepidoptera_library.csv") %>% 
+  mutate(ID = seq(1:40000))
+test_seq <- read.csv("lepidoptera_data/test_sequences.csv")
+
+lep <- lep %>% 
+  group_by(Genus) %>% 
+  mutate(n = n()) %>% 
+  arrange(ID) 
+```
+
+papers to reference: https://www.biotaxa.org/Zootaxa/article/view/zootaxa.3148.1.41/41699 https://www.sciencedirect.com/science/article/pii/S0378111916305364
+
+```{r test}
+lep_matrix <- str_split(lep$DNA, pattern="", simplify =T)
+test_seq_matrix <- str_split(test_seq$DNA, pattern="", simplify = T)
+
+lep_matrix[!(lep_matrix %in% c("G","T","A","C","-"))] <- "-"
+
+test_seq_matrix[!(test_seq_matrix %in% c("G","T","A","C","-"))] <- "-"
+```
+
+```{r stratified sampling}
+set.seed(12345)
+train_sample <- lep %>% 
+  group_by(Genus) %>% 
+  sample_frac(size = .7)
+test_sample <- anti_join(lep, train_sample)
+
+x_training <- lep_matrix[train_sample$ID,]
+x_testing <- lep_matrix[test_sample$ID, ]
+family_training <- train_sample$Family
+genus_training <- train_sample$Genus
+family_testing <- test_sample$Family
+genus_testing <- test_sample$Family
+
+```
+
+```{r eval = FALSE}
+# Split data into training (70%) and testing (30%) sets
+set.seed(12345)
+
+data_sample <- sample(c(TRUE, FALSE), dim(lep_matrix)[1], replace = TRUE, prob = c(0.7, 0.3))
+x_training <- lep_matrix[data_sample, ]
+x_testing <- lep_matrix[!data_sample, ]
+family_training <- lep$Family[data_sample]
+genus_training <- lep$Genus[data_sample]
+family_testing <- lep$Family[!data_sample]
+genus_testing <- lep$Genus[!data_sample]
+```
+
+```{r LDA QDA}
+linear <- MASS::lda(Family ~., data = genus_training)
+quadratic <- MASS::qda(Species~., data = family_training)
+```
+
+```{r kcounts}
+kmer3_x_training <- kcount(x_training, k = 3)
+kmer3_x_testing <- kcount(x_testing, k = 3)
+
+kmer4_x_training <- kcount(x_training, k = 4)
+kmer4_x_testing <- kcount(x_testing, k = 4)
+
+kmer5_x_training <- kcount(x_training, k = 5)
+kmer5_x_testing <- kcount(x_testing, k = 5)
+```
+
+```{r fit model for training}
+registerDoParallel(detectCores() / 2)
+
+kmer3model <- cv.glmnet(kmer3_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+kmer3accuracy <- mean(predict(kmer3model, kmer3_x_testing, type = "class") == family_testing)
+
+kmer4model <- cv.glmnet(kmer4_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+kmer4accuracy <- mean(predict(kmer4model, kmer4_x_testing, type = "class") == family_testing)
+
+kmer5model <- cv.glmnet(kmer5_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+kmer5accuracy <- mean(predict(kmer5model, kmer5_x_testing, type = "class") == family_testing)
+```
+
+```{r}
+registerDoParallel(detectCores() / 2)
+
+kmer5model <- cv.glmnet(kmer5_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+ 
+print(kmer5model)
+
+```
+
+```{r}
+kmer5accuracy <- mean(predict(kmer5model, kmer5_x_testing, type = "class") == family_testing)
+
+print(kmer5accuracy)
+```
+
+```{r}
+kmer5model$lambda.min
+coef(kmer5model, s = "lambda.min")
+
+```
+
+```{r}
+kmer5modelfit <- glmnet(kmer5_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+```
+
+```{r}
+plot(kmer5modelfit, xvar = "lambda", label = TRUE, type.coef = "2norm")
+```
+
+```{r eval = FALSE}
+save(kmer3model, file = "kmer3model.rda")
+save(kmer4model, file = "kmer4model.rda")
+save(kmer5model, file = "kmer5model.rda")
+save(kmer3_x_training, file = "kmer_3_x_training.rda")
+save(kmer3_x_testing, file = "kmer_3_x_testing.rda")
+save(kmer4_x_training, file = "kmer_4_x_training.rda")
+save(kmer4_x_testing, file = "kmer_4_x_testing.rda")
+save(kmer5_x_training, file = "kmer_5_x_training.rda")
+save(kmer5_x_testing, file = "kmer5_x_testing.rda")
+save(kmer5model, file = "kmer5model_stratified.rda")
+```
+
+```{r loading data}
+load(file = "kmer_5_x_training.rda")
+load(file = "kmer5_x_testing.rda")
+load(file = "kmer5model.rda")
+load(file = "kmer4model.rda")
+load(file = "kmer3model.rda")
+load(file = "kmer_3_x_training.rda")
+load(file = "kmer_3_x_testing.rda")
+load(file = "kmer_4_x_training.rda")
+load(file = "kmer_4_x_testing.rda")
+```
+
+```{r model}
+predictions <- predict(kmer5model, kmer5_x_testing, type = "class")
+
+predict_truth <- tibble(predict = predictions[,1],
+       truth = family_testing,
+       genus = genus_testing) %>%
+  mutate(correct = predict == truth)
+
+x <- confusionMatrix(table(predictions, family_testing))
+names <- sort(unique(lep$Family))
+modelOutput <- as_tibble(x$byClass) %>% 
+  mutate(Class = names) %>%
+  dplyr::select(Class, everything())
+
+modelOutput %>% 
+  kable(digits = 3)
+
+```
+
+```{r naiveBayes model}
+set.seed(123)
+
+data <- as.tibble(cbind(kmer4_x_training_wfam, genus_training))
+
+classifier <- naiveBayes(genus_training ~ ., data = data)
+
+species_pred <- predict(classifier, newdata = genus_testing)
+
+table <- table(genus_testing,  species_pred)
+
+```
+
+```{r ROC2}
+predictions5 <- predict(kmer5model, kmer5_x_testing, type = "class")
+
+predictions4 <- predict(kmer4model, kmer4_x_testing, type = "class")
+
+predictions3 <- predict(kmer3model, kmer3_x_testing, type = "class")
+
+roc5 = roc(response = family_testing, predictor = factor(predictions5, ordered = TRUE))
+
+plot(roc5, main = "Family KMER 5 ROC curve")
+
+roc4 = roc(response = family_testing, predictor = factor(predictions4, ordered = TRUE))
+
+plot(roc4, main = "Family KMER 4 ROC curve")
+
+roc3 = roc(response = family_testing, predictor = factor(predictions3, ordered = TRUE))
+
+plot(roc3, main = "Family KMER 3 ROC curve")
+```
+
+```{r}
+plot(kmer5model)
+plot(kmer4model)
+plot(kmer3model)
+```
+
+```{r understanding output}
+probabilities <- as.tibble(
+  predict(kmer5model, kmer5_x_testing, type = "response")
+)
+
+```
+
+```{r getting high genus counts }
+predict_genus_dataset <- train_sample %>% 
+  filter(n >= 20) %>% 
+  arrange(ID)
+
+matrix_more_20 <- cbind(lep_matrix, lep$Family)[predict_genus_dataset$ID, ]
+
+family_labels <- matrix_more_20[,902 ] 
+
+k4_matrix_more_20 <- kcount(matrix_more_20[,-902], k = 4)
+k4_matrix_more_20 <- cbind(k4_matrix_more_20, as.numeric(as.factor(family_labels)))
+genus_training <- predict_genus_dataset$Genus
+```
+
+```{r fit model}
+registerDoParallel(detectCores() / 2)
+```
+
+```{r fitting to more than 20 genus}
+
+x_training[x_training == "A"] <- 1
+x_training[x_training == "G"] <- 2
+x_training[x_training == "T"] <- 3
+x_training[x_training == "C"] <- 4
+x_training[x_training == "-"] <- 5
+x_training <- matrix(as.numeric(x_training), ncol = 901)
+
+x_testing[x_testing == "A"] <- 1
+x_testing[x_testing == "G"] <- 2
+x_testing[x_testing == "T"] <- 3
+x_testing[x_testing == "C"] <- 4
+x_testing[x_testing == "-"] <- 5
+x_testing <- matrix(as.numeric(x_testing), ncol = 901)
+```
+
+```{r getting training/testing}
+registerDoParallel(detectCores() / 2)
+loci_model <- cv.glmnet(x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+loci_model_accuracy <- mean(predict(loci_model,x_testing, type = "class") == family_testing)
+```
+
+```{r saving loci_model}
+save(loci_model, file = "loci_model.rda")
+```
+
+```{r loci model predict}
+predictions <- predict(loci_model, x_testing, type = "class")
+
+predict_truth <- tibble(predict = predictions[,1],
+       truth = family_testing,
+       genus = genus_testing) %>%
+  mutate(correct = predict == truth)
+
+x <- confusionMatrix(table(predictions, family_testing))
+names <- sort(unique(lep$Family))
+modelOutput <- as_tibble(x$byClass) %>% 
+  mutate(Class = names) %>%
+  dplyr::select(Class, everything())
+
+modelOutput %>% 
+  kable(digits = 3) 
+
+```
+
+```{r coefficients}
+
+coefficients <- coef(loci_model)
+
+coefficient_matrix <- cbind(coefficients$Crambidae[,1],
+      coefficients$Erebidae[,1],
+      coefficients$Gelechiidae[,1],
+      coefficients$Geometridae[,1],
+      coefficients$Hesperiidae[,1],
+      coefficients$Noctuidae[,1],
+      coefficients$Nymphalidae[,1],
+      coefficients$Oecophoridae[,1],
+      coefficients$Pyralidae[,1],
+      coefficients$Saturniidae[,1],
+      coefficients$Sphingidae[,1],
+      coefficients$Tortricidae[,1]
+    )
+
+tibble(coefficient_sum = rowSums(abs(coefficient_matrix))) %>% 
+  mutate(id = 1:902) %>% 
+  filter(coefficient_sum != 0) %>% 
+  arrange(desc(coefficient_sum))
+
+apply(coefficient_matrix,2, max)
+
+argmax
+```

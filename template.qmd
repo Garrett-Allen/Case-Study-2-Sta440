@@ -1,0 +1,555 @@
+---
+title: "Case Study 2 - Classifying DNA Barcodes (Runtime: ~60 min)"
+subtitle: "Garrett Allen, Isabella Swigart, Ayaan Patel, Matthew Cui"
+format: pdf
+editor: visual
+fontsize: 11pt
+execute: 
+  echo: false
+  results: false
+  warning: false
+bibliography: references.bib
+---
+
+```{r check-installation}
+#| echo: false
+#| output: false
+#| message: false 
+#| warning: false
+#| include: false
+
+packages <- c("tidyverse", "ape", "e1071", "caret", "glmnet", "knitr", "doParallel", "kableExtra", "MASS", "pROC", "patchwork", "caTools", "randomForest") #add future packages in here for reproducibility point
+install.packages(setdiff(packages, rownames(installed.packages())))
+```
+
+```{r load-packages-dat}
+#| echo: false
+#| output: false
+#| message: false 
+#| warning: false
+#| include: false
+
+library(tidyverse)
+library(ape)
+library(e1071)
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(kmer)
+library(ape)
+library(doParallel)
+library(kableExtra)
+library(MASS)
+library(pROC)
+library(patchwork)
+library(caTools)
+library(randomForest)
+
+load(file = "kmer5model.rda")
+load(file = "kmer4model.rda")
+load(file = "kmer3model.rda")
+```
+
+\vspace{-5truemm}
+
+# 1 Introduction
+
+Biodiversity research relies heavily on DNA barcoding, which is a technique used to classify and identify species using DNA sequences. DNA barcoding involves several steps, including the collection of biological material, DNA sequencing, alignment of sequences, and the assignment of a taxonomic name (Herbert et al, 2003). In recent years, DNA barcoding has become an essential tool in biodiversity research due to its speed, accuracy, and efficiency [@winterton2007]. In this case study, we are presented with a set of 7,000 aligned DNA sequences obtained from butterfly specimens captured in a Finnish forest. Our goal is to classify the sequences into their respective families and genera, using a historical dataset of 40,000 annotated DNA sequences for which annotations have been confidently established. The aim is to build a classification model using the historical dataset to annotate the 7000 sequences at the family and genus levels and to introduce a measure of uncertainty in our predictions. This study showcases the power of DNA barcoding in classifying species and highlights the importance of using machine learning techniques to improve the accuracy of these classifications.
+
+To achieve this goal, we will explore various classification methods, such as using k-mer sequences with LASSO regression and random forests. We are investigating the importance of the entire DNA sequence for classification and identify the loci that are particularly relevant to classification. The results of this project have practical implications for biodiversity research, as accurate taxonomic classification is essential for understanding and managing biodiversity.
+
+# 2 Methods
+
+## 2.1 Data Wrangling
+
+The data library contained 40,000 instances of four variables that were used in this study. It contained information on the families, genera, species associated with a specific DNA sequence. Our first step to tidy this data was to assign each observation a unique ID based on the initial ordering of the data for easier identification and future data manipulation. We then split the \`DNA\` sequence on the individual nucleotide level and replace characters that are not G, T, A, C, U, or a dash ("-") with a dash to remove other non-standard characters that might be in the dataset in preparation for counting k-mer sequences.
+
+```{r load-data}
+#| echo: false
+#| output: false
+#| message: false 
+#| warning: false
+#| include: false
+lep<- read.csv("lepidoptera_data/Lepidoptera_library.csv") %>% 
+  mutate(ID = seq(1:40000))
+test_seq <- read.csv("lepidoptera_data/test_sequences.csv")
+
+lep_df <- lep %>% 
+  group_by(Genus) %>% 
+  mutate(n = n()) %>% 
+  arrange(ID)  %>% 
+  ungroup() %>% 
+  mutate(type = "train") %>% 
+  separate(DNA, sep = "", into = paste0("loci_", 0:901)) %>% 
+  dplyr::select(-loci_0)
+
+test_seq_df <- test_seq %>% 
+  separate(DNA, sep = "", into = paste0("loci_",0:901)) %>% 
+  dplyr::select(-loci_0) %>% 
+  mutate(type = "test")
+  
+comb_df <- lep_df %>% 
+  add_row(test_seq_df) %>% 
+  mutate(across(.cols = loci_1:loci_901,~ factor(.x))) 
+
+lep_df <- comb_df %>% 
+  filter(type == "train")
+
+test_seq_df <- comb_df %>% 
+  filter(type == "test")
+```
+
+```{r test}
+#| echo: false
+#| output: false
+#| message: false 
+#| warning: false
+#| include: false
+lep_matrix <- str_split(lep$DNA, pattern="", simplify =T)
+test_seq_matrix <- str_split(test_seq$DNA, pattern="", simplify = T)
+lep_matrix[!(lep_matrix %in% c("G","T","A","C","-"))] <- "-"
+test_seq_matrix[!(test_seq_matrix %in% c("G","T","A","C","-"))] <- "-"
+# change this
+```
+
+## 2.2 Exploratory Data Analysis
+
+@fig-boxplot reviews the distribution of each genus' frequency in the Lepidoptera library. The overall number of observations for each family are reported above each boxplot. For more interpretable y-axis scaling, this visualization filtered out any genus that occurred more than 250 times in the library. There were relatively few outliers of this sort, only Eupithecia (Geometridae family) with 432 instances, Scoparia (Crambidae) with 362 instances, Euxoa (Noctuidae family) with 289 instances, and Catocala (Erebidae) with 256 instances. We see that for most families, the upper quartile of the most frequently observed genera still contain less than 25 instances in the Lepidoptera library. All families have dozens of genera that only appear once in the library, which could pose a challenge when classifying genus.
+
+```{r}
+#| label: fig-boxplot
+#| fig-cap: Number of Observations of Genera Within Families
+all_combos <- lep %>%
+  group_by(Family, Genus) %>%
+  count() %>%
+  summarise(Family, Genus, n) %>%
+  arrange(desc(n)) 
+
+labs <- all_combos %>%
+  group_by(Family) %>%
+  summarise(Family, num_genera = sum(n))
+
+labs <- all_combos %>%
+  filter(n < 250) %>%
+  group_by(Family) %>%
+  summarize(ypos = max(n) + 20) %>%
+  inner_join(., labs)
+
+ggplot(all_combos %>% filter(n <= 250), aes(x=Family, y = n)) +
+  geom_boxplot() + 
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=30, hjust=1)) +
+  labs(y = "Count") +
+   geom_text(data = labs, aes(label = num_genera, y = ypos), 
+               position = position_dodge(width = .75), 
+               show.legend = FALSE )
+```
+
+```{r}
+#| label: tbl-fam-genus-counts
+#| tbl-cap: Most Frequent Genus By Family
+
+lep_df %>% 
+  group_by(Family) %>% 
+  count(Family, Genus) %>% 
+  arrange(desc(n)) %>% 
+  mutate(Total = sum(n),
+         Proportion = n * 100/ Total) %>%
+  slice(1) %>% 
+  ungroup() %>% 
+  arrange(desc(Proportion)) %>% 
+  mutate(Proportion = paste0(round(Proportion, 2), "%")) %>% 
+  rename("Genus Count" = n,
+         "Proportion of Family" = Proportion) %>% 
+  dplyr::select(1,2,3,5) %>%
+  kable() %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+@tbl-fam-genus-counts displays the most frequent genus of each family, as well as the proportion of said genus within that family. We see that the number of observations in the Lepidoptera library belonging to each family is quite balanced, and, amongst each family, there is not one genus that dominates the makeup in the dataset. We also see in @fig-boxplot that every family has a comparable number of instances in the dataset. Therefore, we can conclude that there isn't a class imbalance, so no further procedures of under or over-sampling is needed to ensure the integrity of later models.
+
+## 2.3 Modeling
+
+### 2.3.1 Family Model
+
+```{r stratified-sampling}
+set.seed(12345)
+train_sample <- lep %>% 
+  group_by(Genus) %>% 
+  sample_frac(size = .7)
+test_sample <- anti_join(lep, train_sample)
+
+x_training <- lep_matrix[train_sample$ID,]
+x_testing <- lep_matrix[test_sample$ID, ]
+family_training <- train_sample$Family
+genus_training <- train_sample$Genus
+family_testing <- test_sample$Family
+genus_testing <- test_sample$Genus
+
+```
+
+One of the goals of our analysis is to create a model to predict family of a DNA strand based on the loci. To fit the family model, the Lepidoptera library was randomly sampled to be split into a training and test set that contained 70% and 30% of the observations, respectively. We then tried both a k-mer penalized regression model with k = 3,4,5, as well as a model where we let the loci themselves be covariates in a penalized LASSO regression (Loci model). The Loci model had the highest average accuracy predicting families (97.5%), so we will be proceeding with this model in our analysis of sequences.
+
+```{r kcounts, eval = FALSE}
+kmer3_x_training <- kcount(x_training, k = 3)
+kmer3_x_testing <- kcount(x_testing, k = 3)
+
+kmer4_x_training <- kcount(x_training, k = 4)
+kmer4_x_testing <- kcount(x_testing, k = 4)
+
+kmer5_x_training <- kcount(x_training, k = 5)
+kmer5_x_testing <- kcount(x_testing, k = 5)
+```
+
+```{r train-fitting, eval = FALSE}
+registerDoParallel(detectCores() / 2)
+
+kmer3model <- cv.glmnet(kmer3_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+kmer3accuracy <- mean(predict(kmer3model, kmer3_x_testing, type = "class") == family_testing)
+
+kmer4model <- cv.glmnet(kmer4_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+kmer4accuracy <- mean(predict(kmer4model, kmer4_x_testing, type = "class") == family_testing)
+
+kmer5model <- cv.glmnet(kmer5_x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+
+kmer5accuracy <- mean(predict(kmer5model, kmer5_x_testing, type = "class") == family_testing)
+```
+
+```{r kmer5-coeff, eval = FALSE, echo = FALSE}
+kmer5model$lambda.min
+coef(kmer5model, s = "lambda.min")
+```
+
+### 2.3.2 Modeling Loci Locations
+
+In addition to creating a model that accurately identifies families and genera, an important question of interest was specifically which loci are important for classification of Lepidoptera. We used our Loci model described above for this task, since the importance of various loci in predicting family would allow us to analyze which locations are most important for classification. We used 5-fold cross validation to fit the model and find the optimal lambda parameters. We ultimately used this model to predict the family of the 7000 unlabeled specimens.
+
+```{r fitting to more than 20 genus}
+
+x_training[x_training == "A"] <- 1
+x_training[x_training == "G"] <- 2
+x_training[x_training == "T"] <- 3
+x_training[x_training == "C"] <- 4
+x_training[x_training == "-"] <- 5
+x_training <- matrix(as.numeric(x_training), ncol = 901)
+
+x_testing[x_testing == "A"] <- 1
+x_testing[x_testing == "G"] <- 2
+x_testing[x_testing == "T"] <- 3
+x_testing[x_testing == "C"] <- 4
+x_testing[x_testing == "-"] <- 5
+x_testing <- matrix(as.numeric(x_testing), ncol = 901)
+```
+
+```{r getting-training-testing, eval = FALSE}
+registerDoParallel(detectCores() / 2)
+loci_model <- cv.glmnet(x_training, family_training, family = "multinomial", nfolds = 5, type.measure = "class", trace.it = 1, parallel = TRUE)
+save(loci_model, file = "loci_model.rda")
+```
+
+```{r load-loci}
+load("loci_model.rda")
+loci_model_accuracy <- mean(predict(loci_model,x_testing, type = "class") == family_testing)
+```
+
+```{r}
+#| label: tbl-loci-predict
+#| tbl-cap: In-Sample Loci Model Output
+predictions <- predict(loci_model, x_testing, type = "class")
+
+predict_truth <- tibble(predict = predictions[,1],
+       truth = family_testing,
+       genus = genus_testing,
+       ID = test_sample$ID) %>%
+  mutate(correct = predict == truth)
+
+x <- confusionMatrix(table(predictions, family_testing))
+names <- sort(unique(lep$Family))
+modelOutput <- as_tibble(x$byClass) %>% 
+  mutate(Class = names) %>%
+  dplyr::select(Class, everything())
+
+modelOutput %>% 
+  dplyr::select(Class,Sensitivity, Specificity, Precision, Recall) %>% 
+  kable() 
+
+familyList <- lep %>% 
+  dplyr::select(Family) %>% 
+  distinct() %>% 
+  pull()
+```
+
+As seen in @tbl-loci-predict, the precision, recall, specificity, and sensitivity are incredibly high, indicating that the loci locations are very indicative of what family a species resides in. This suggests that the coefficients of our model for each loci will be indicative of its contribution to classification, as it has very high accuracy on the in-sample test set (97%).
+
+We can analyze the coefficients from this model to determine which loci locations are particularly important to family classification. Specifically, LASSO sets unimportant coefficients to zero, so any coefficients that are set to zero for all families provide no benefit to classification. Those that have high coefficients across the families (in absolute value) are generally important to classification. Thus, we propose the following metric to evaluate a loci's importance:
+
+$$\textrm{C}(I) = \sum_j  |I_{j}|$$ where $I$ indicates the loci location and $j$ indicates which family the coefficient is for, and $I_j$ is the value of the coefficient for the $I$th loci in the $j$th family. We will call this the C-Value of a loci.
+
+```{r coefficient-gathering}
+coefficients <- coef(loci_model)
+
+coefficient_matrix <- cbind(coefficients$Crambidae[,1],
+      coefficients$Erebidae[,1],
+      coefficients$Gelechiidae[,1],
+      coefficients$Geometridae[,1],
+      coefficients$Hesperiidae[,1],
+      coefficients$Noctuidae[,1],
+      coefficients$Nymphalidae[,1],
+      coefficients$Oecophoridae[,1],
+      coefficients$Pyralidae[,1],
+      coefficients$Saturniidae[,1],
+      coefficients$Sphingidae[,1],
+      coefficients$Tortricidae[,1]
+    )
+
+important_coefficients <- tibble(`C-Value` = rowSums(abs(coefficient_matrix))) %>% 
+  mutate(Loci = 0:901) %>% 
+  arrange(desc(`C-Value`)) 
+
+imp_coef <- important_coefficients %>% 
+  filter(`C-Value` != 0) %>% 
+  slice(-1) %>% 
+  slice(1:10) %>% 
+  dplyr::select(Loci, `C-Value`) %>% 
+  kable(digits = 3, caption = "Top 10 Loci According to C-Value") 
+
+tab <- matrix(c(422,520,329,415,582,521,522,580,327,303,7.33,6.88,6.82,6.49,5.73,5.27,5.25,5.01,4.40,4.32), ncol=10, byrow=TRUE)
+rownames(tab) <- c('Loci','C-Value')
+tab <- as.table(tab)
+```
+
+```{r}
+#| label: tbl-top-loci
+#| tbl-cap: Top 10 Loci According to C-Value
+
+tab %>%
+  kable(digits = 2)  %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r}
+#| label: fig-c-values
+#| fig-cap: Importance of Loci by C-Value
+#| fig-height: 2
+important_coefficients %>% 
+  slice(-1) %>% 
+  ggplot(aes(x = Loci, y = `C-Value`)) + 
+  geom_col() + 
+  theme_bw() + 
+  labs(x = "Loci",
+       y = "C-Value")
+
+```
+
+In @tbl-top-loci, we list the top 10 loci according to their C-Value. This shows that the top loci are largely present in the middle between 300-600, and that they are most distinctive when determining the family.
+
+From @fig-c-values, we can see the distribution of C-Value across the DNA strand --- this also supports our hypothesis that the middle values are the most important for determining family value, as they have the highest sum of coefficients across the families. The last 300 or so values are least distinctive, and many of the locations at the beginning and between 200-300 are not very important.
+
+In fact, as shown by the table above, there are more than 500 loci with a C-Value of less than .25, and 376 with a value of 0; that is, the coefficient for that loci was set to zero for all values of family by LASSO.
+
+Thus, from this analysis, we can conclude that the whole sequence is not important for classification. In fact, 376 loci are completely irrelevant for classification in our LASSO model, as their coefficients were entirely set to zero. The important loci are those largely in the middle, between 300-600, as justified by both the top 10 most important loci and our graph above.
+
+```{r randomForest fitting, eval = FALSE}
+fitToFamily <- function(family){
+  
+  set.seed(120)
+  
+  registerDoParallel(20 / 2)
+  
+  noc <- lep_df %>% 
+    filter(Family == family) %>% 
+    dplyr::select(-Species,-Family,-n) %>% 
+    mutate(Genus = as.factor(Genus))
+  
+  print("made data")  
+  
+  train <- sample_frac(noc,size = .7)
+
+  test <- anti_join(noc,train, by = "ID") %>% 
+    dplyr::select(-ID)
+  
+  train <- train %>% 
+    dplyr::select(-ID)
+  
+  print("Fitting forest...")
+  rf <- foreach(ntree = rep(250,20), .combine = combine, .packages = 'randomForest') %dopar%
+      randomForest(droplevels(as.factor(Genus)) ~ ., data = train, do.trace = TRUE, na.action = na.omit, ntree = ntree)
+  
+  list(rf,test,train)
+} 
+
+
+
+for(x in familyList){
+  print(paste0("Starting model ",x))
+  model_output <- fitToFamily(x)
+  dir.create(paste0(x,"_model_fit"))
+  rf_model <- model_output[[1]]
+  rf_test <- model_output[[2]]
+  rf_train <- model_output[[3]]
+  save(rf_model, file = paste0(x,"_model_fit/",x,"_model.rda"))
+  save(rf_test, file = paste0(x,"_model_fit/",x,"_test.rda"))
+  save(rf_train, file = paste0(x,"_model_fit/",x,"_train.rda"))
+}
+
+
+```
+
+### 2.3.3 Genera Modelling
+
+To predict the in-family genera that the unlabeled sequences belonged to, we fit twelve 5000 tree random forest models, one for each family. Each random forest predicted the genus within a specific family, and used loci locations as covariates. Models were fit using a 70-30 train test split, and accuracy was assessed by performance on tsting data for a specific family. We decided to create separate models for genus prediction for each family primarily because our family predictions were shown to have very high accuracy and because it reduced the number of classes each random forest model could predict, thus making it easier for the model to identify patterns in the data. One weakness of this approach is that errors in family necessarily result in errors in genus prediction, as our genus models cannot predict a new genus not present in the family. Future work could try to address this sort of uncertainty propagation by adding a way to easily correct incorrect/low confidence family labels.
+
+```{r load accuracyTable}
+#| label: tbl-genus-predict
+#| tbl-cap: Genus Prediction In-Sample Accuracy by Family
+load("accuracy_genus.rda")
+accuracy_table %>%
+  kable() %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+We have an average in-sample accuracy of 0.856 across all 12 families. According to @tbl-genus-predict, our most accurate genus predictions are within the Saturniidae family (0.926), and our least accurate predictions are within the Pyralidae family (0.784). Saturniidae may have such success because it contains the fewest number of single-occurring genera among all families (26 single occurrences compared to an average of \~122 among the other 11 families).
+
+```{r assessing model fit, eval = FALSE}
+
+load_model <- function(x){
+  load(paste0("model_fits/",x,"_model_fit/",x,"_model.rda"), envir = .GlobalEnv)
+  load(paste0("model_fits/",x,"_model_fit/",x,"_test.rda"), envir = .GlobalEnv)
+  load(paste0("model_fits/",x,"_model_fit/",x,"_train.rda"), envir = .GlobalEnv) 
+}
+
+modelAccuracy <- list()
+test_genus <- rf_test
+train_genus <- rf_train
+
+for(x in familyList[2:12]){
+ load_model(x)
+ modelAccuracy[[x]] <- mean(predict(rf_model, rf_test) == as.character(rf_test$Genus))
+ test_genus <- add_row(test_genus,rf_test)
+ train_genus <- add_row(train_genus,rf_train)
+}
+
+accuracy_table <- as.tibble(modelAccuracy) %>% 
+  pivot_longer(cols = everything(), names_to = "Family", values_to = "Accuracy")
+
+save(accuracy_table, file = "accuracy_genus.rda")
+```
+
+```{r full accuracy assessment}
+# TODO: Run a full assessment of our model on a testing dataset. That is, 
+# use loci model to fit family labels on testing set. then, based on test 
+# set families, fit genus labels using random forest models. then, assess
+# overall genus accuracy from that. 
+```
+
+```{r helper function for genus}
+get_genus_predictions <- function(x,dataset){
+  
+  load_model(x)
+  family_df <- dataset %>% 
+    filter(Family == x)
+  
+    genus_predictions <- predict(rf_model, 
+            dplyr::select(family_df,-Family,-ID)
+            )
+    all_prob <- predict(rf_model,
+                        dplyr::select(family_df,-Family,-ID),
+                        type = "prob"
+                        )
+    
+    genus_prob <- apply(all_prob,1,max)
+    
+    family_df %>% 
+      mutate(Genus = genus_predictions,
+             Prob_genus = genus_prob) %>% 
+      dplyr::select(ID, Genus, Prob_genus)
+}
+```
+
+```{r getting final results for test sequences, eval = FALSE}
+test_predictions <- predict(loci_model, test_seq_matrix, type = "class")
+prob_predictions <- predict(loci_model, test_seq_matrix, type = "response")
+test_prob <- apply(prob_predictions,1,max)
+
+test_seq_df <- test_seq_df %>% 
+  mutate(Family = test_predictions[,1],
+         ID = 1:7000) %>% 
+  dplyr::select(-Genus, -Species)
+
+genus_results <- get_genus_predictions("Noctuidae",test_seq_df)
+for(x in familyList[2:12]){
+  genus_results <- add_row(genus_results, get_genus_predictions(x,test_seq_df))
+}
+
+genus_results %>% 
+  arrange(ID)
+ 
+output <- tibble(Row_index = 1:7000,
+       Family = test_predictions,
+       Prob_Family = test_prob,
+       Genus = genus_results$Genus,
+       Prob_Genus = genus_results$Prob_genus,
+       DNA = test_seq$DNA)
+
+write.csv(output, file = "final_predictions.csv")
+```
+
+# 3 Results
+
+## 3.1 In-Sample Accuracy
+
+In @fig-cm, we report the confusion matrix for family predictions with our final model. While our results were strong overall with 97% accuracy, the model did have a tendency to label Noctuidae as Erebidae and occasionally Geometridae.
+
+```{r}
+#| label: fig-cm
+#| fig-cap: Confusion Matrix for In-Sample Family Prediction With Loci Model
+cm <- confusionMatrix(as.factor(predict_truth$truth), as.factor(predict_truth$predict), dnn = c("Prediction", "Reference"))
+
+plt <- as.data.frame(cm$table)
+plt$Prediction <- factor(plt$Prediction, levels=rev(levels(plt$Prediction)))
+
+ggplot(plt, aes(Prediction,Reference, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+  theme(axis.text.x=element_text(angle=30, hjust=1)) 
+```
+
+## 3.2 Unlabeled Sequence Composition
+
+```{r}
+#| label: tbl-compare
+#| tbl-cap: Comparison of Relative Family Composition of Labeled and Unlabeled Specimens
+
+final_predictions <- read_csv("final_predictions.csv")
+
+prop_pred <- final_predictions %>%
+  group_by(Family) %>%
+  count() %>%
+  summarise(Family, "Labeled Specimens" = n/7000)
+
+prop_known <- lep %>%
+  group_by(Family) %>%
+  count() %>%
+  summarise(Family, "Unlabeled Specimens" = n/40000)
+
+cbind(prop_known, prop_pred[2]) %>%
+  kable()  %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+Our final predictions for the 7000 unlabeled sequences are made using the loci model to predict family and using the respective random forest-fitted family model to predict genus. Our predictive probabilities for family range from 0.223 to 0.999, with a median of 0.998, while our predictive probabilities for genus range from 0.016 to 1.000, with a median of 0.681. Additionally, as shown in @tbl-compare, the relative proportions of families within the labeled and unlabeled specimens are quite similar.
+
+# 4 Discussion
+
+In conclusion, this study provided concrete insights into classification of DNA sequences and drew conclusions on the importance of the location of loci in DNA modeling. Through LASSO penalization of unimportant loci, we realized that the entirety of the DNA sequence is not needed for prediction, and that the most important loci positions for these classification problems were largely in the middle of the sequence. A significant implication of this finding for the larger field of computational genomics and biology is that future studies are able to reduce required computing power to process a same amount of data, or that similar investigations have greater scalability. Both the loci and genera models using a LASSO and random forest approach produced high in-sample accuracies.
+
+One major weakness of this study was that it did not account for the presence of a novel family or genus in the test dataset. We cannot conclude that our model is able to identify new instances of Lepidoptera, since our model can only currently predict categories present in the training dataset. Future work should explore ad-hoc ways to handle new families and genera, likely by outputting "New" or "Unknown" when the probability of any existing class is too low. Future work can also investigate using loci importance to inform a better classifier.
+
+Lastly, for our prediction of the unlabeled sequences, the average probability for family prediction is 95.1%, whereas genus prediction only sits at 58.3%. Moreover, the median family prediction probability is a quite impressive 99.8%, contrasting with the 68.2% value for genera. In order to enhance the accuracy of our predictions, we can address the issue of imbalanced data by collecting additional samples for genera with limited data points. By doing so, we can balance our dataset and avoid any biases towards predicting genera that have more data points. Another interesting observation we noticed from the predicted probabilities is that there is no correlation between prediction probabilities of families and its respective genera, meaning that better prediction at the family level does not necessarily translate to the genus level for a given family.
+
+# References
+
+Hebert, P. D., Cywinska, A., Ball, S. L., & deWaard, J. R. (2003). Biological identifications through DNA barcodes. *Proceedings. Biological sciences*, *270*(1512), 313--321. https://doi.org/10.1098/rspb.2002.2218

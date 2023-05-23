@@ -1,0 +1,81 @@
+```{r}
+library(tidyverse)
+```
+
+```{r}
+lep <- Lepidoptera_library
+
+lep %>%
+  group_by(Family, Genus) %>%
+  count() %>%
+  summarise(Family, Genus, n) %>%
+  arrange(desc(n))
+
+lep %>%
+  group_by(Family, Genus) %>%
+  count() %>%
+  summarise(Family, Genus, n) %>%
+  arrange(desc(Family)) %>%
+  select(Family, Genus) %>%
+  distinct()
+
+lep %>%
+  select(Family) %>%
+  distinct()
+```
+
+```{r eda1}
+#eda idea: stacked bar chart of 100 most popular genus + family combos ??
+
+all_combos <- lep %>%
+  group_by(Family, Genus) %>%
+  count() %>%
+  summarise(Family, Genus, n) %>%
+  arrange(desc(n)) 
+
+joined_data <- left_join(lep, all_combos %>%
+  group_by(Family) %>%
+  count() %>%
+  summarise(Family, num_genus = n), by = "Family") 
+
+joined_data <- left_join(joined_data, lep %>%
+                             group_by(Family) %>%
+                             count() %>%
+                             summarise(Family, num_obvs = n), by = "Family")
+
+
+
+
+ggplot(joined_data, aes(x = Family, fill = num_genus)) + 
+  geom_bar() +
+  theme(axis.text.x=element_text(angle=30, hjust=1)) +
+  labs(title = "Understanding Family and Genus",
+       subtitle = "Based on Lepidoptera Training Library",
+       y = "Count of Observations of Each Family",
+       x = "Family",
+       fill = "Number of\nGenuses Within\nEach Family") +
+  scale_fill_continuous(trans = 'reverse')
+
+  
+```
+
+```{r}
+
+ggplot(all_combos %>% filter(n >= 10, n<=100), aes(x=n)) +
+  geom_histogram()
+```
+
+```{r}
+#filtered for 10 <= n <= 300
+ggplot(all_combos %>% filter(n >= 10, n <= 300), aes(x=Family, y = n)) +
+  geom_boxplot() +
+  theme(axis.text.x=element_text(angle=30, hjust=1)) +
+  labs(title = "Number of Observations of Genuses Within Families",
+       subtitle = "Based on Lepidoptera Training Library",
+       y = "Count")
+```
+
+```{r}
+
+```
+
