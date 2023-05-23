@@ -19,3 +19,5 @@ To achieve this goal, we will explore various classification methods, such as us
 of the entire DNA sequence for classification and identify the loci that are particularly relevant to classification. The results of this project have practical implications for biodiversity
 research, as accurate taxonomic classification is essential for understanding and managing
 biodiversity
+
+The full analysis with code can be found in Final_Report_With_Code.qmd, and the full report in pdf format can be found in Final_Report.pdf
